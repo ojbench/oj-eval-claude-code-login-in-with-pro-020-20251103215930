@@ -81,11 +81,9 @@ static void add_to_free_list(int page_idx, int rank) {
     }
     free_lists[rank] = block;
 
-    // Mark all pages in this free block with the rank (without ALLOCATED_BIT)
-    int pages_in_block = 1 << (rank - 1);
-    for (int i = 0; i < pages_in_block; i++) {
-        page_rank[page_idx + i] = rank;  // Free block
-    }
+    // Only mark the first page of the free block with the rank
+    // This is sufficient for buddy merging check
+    page_rank[page_idx] = rank;  // Free block
 }
 
 int init_page(void *p, int pgcount) {
