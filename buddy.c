@@ -3,6 +3,7 @@
 
 #define MAXRANK 16
 #define PAGE_SIZE 4096
+#define ALLOCATED_BIT 0x80  // High bit indicates allocated
 
 // Free list for each rank
 typedef struct free_block {
@@ -12,7 +13,9 @@ typedef struct free_block {
 static free_block_t *free_lists[MAXRANK + 1];
 static void *memory_start;
 static int total_pages;
-static unsigned char page_rank[65536]; // Track rank of each page (0 if free, >0 if allocated)
+static unsigned char page_rank[65536]; // Track rank of each page
+                                       // bit 7: 1=allocated, 0=free
+                                       // bits 0-6: rank (1-16)
 
 // Helper function to get page index
 static int get_page_index(void *p) {
@@ -32,15 +35,17 @@ static int get_buddy_index(int page_idx, int rank) {
     return page_idx ^ pages_in_block;
 }
 
-// Helper function to check if a block is free
-static int is_block_free(int page_idx, int rank) {
-    int pages_in_block = 1 << (rank - 1);
-    for (int i = 0; i < pages_in_block; i++) {
-        if (page_rank[page_idx + i] != 0) {
-            return 0;
+// Helper function to check if a block is in free list
+static int is_block_in_free_list(int page_idx, int rank) {
+    void *block_addr = memory_start + page_idx * PAGE_SIZE;
+    free_block_t *current = free_lists[rank];
+    while (current != NULL) {
+        if ((void *)current == block_addr) {
+            return 1;
         }
+        current = current->next;
     }
-    return 1;
+    return 0;
 }
 
 // Helper function to remove a block from free list
@@ -63,6 +68,12 @@ static void add_to_free_list(int page_idx, int rank) {
     free_block_t *block = (free_block_t *)block_addr;
     block->next = free_lists[rank];
     free_lists[rank] = block;
+
+    // Mark all pages in this free block with the rank (without ALLOCATED_BIT)
+    int pages_in_block = 1 << (rank - 1);
+    for (int i = 0; i < pages_in_block; i++) {
+        page_rank[page_idx + i] = rank;  // Free block
+    }
 }
 
 int init_page(void *p, int pgcount) {
@@ -138,7 +149,7 @@ void *alloc_pages(int rank) {
     // Mark pages as allocated
     int pages_in_block = 1 << (rank - 1);
     for (int i = 0; i < pages_in_block; i++) {
-        page_rank[page_idx + i] = rank;
+        page_rank[page_idx + i] = rank | ALLOCATED_BIT;  // Allocated block
     }
 
     return (void *)block;
@@ -155,15 +166,13 @@ int return_pages(void *p) {
     }
 
     // Get the rank of this allocation
-    int rank = page_rank[page_idx];
+    int rank_byte = page_rank[page_idx];
+    if ((rank_byte & ALLOCATED_BIT) == 0) {
+        return -EINVAL;  // Not allocated
+    }
+    int rank = rank_byte & 0x7F;
     if (rank == 0 || rank > MAXRANK) {
         return -EINVAL;
-    }
-
-    // Mark pages as free
-    int pages_in_block = 1 << (rank - 1);
-    for (int i = 0; i < pages_in_block; i++) {
-        page_rank[page_idx + i] = 0;
     }
 
     // Try to merge with buddy
@@ -171,29 +180,15 @@ int return_pages(void *p) {
         int pages_in_block = 1 << (rank - 1);
         int buddy_idx = get_buddy_index(page_idx, rank);
 
-        // Check if buddy exists and is free
+        // Check if buddy exists and is in range
         if (buddy_idx < 0 || buddy_idx + pages_in_block > total_pages) {
             break;
         }
 
-        if (!is_block_free(buddy_idx, rank)) {
-            break;
-        }
-
-        // Check if buddy is actually in the free list
-        int buddy_in_list = 0;
-        free_block_t *current = free_lists[rank];
-        void *buddy_addr = memory_start + buddy_idx * PAGE_SIZE;
-        while (current != NULL) {
-            if ((void *)current == buddy_addr) {
-                buddy_in_list = 1;
-                break;
-            }
-            current = current->next;
-        }
-
-        if (!buddy_in_list) {
-            break;
+        // Quick check: buddy should be free with the same rank
+        // Free blocks have rank without ALLOCATED_BIT
+        if (page_rank[buddy_idx] != rank) {
+            break;  // Buddy is not free with the same rank
         }
 
         // Remove buddy from free list
@@ -206,7 +201,7 @@ int return_pages(void *p) {
         rank++;
     }
 
-    // Add merged block to free list
+    // Add merged block to free list (marks pages as free)
     add_to_free_list(page_idx, rank);
 
     return OK;
@@ -218,22 +213,11 @@ int query_ranks(void *p) {
         return -EINVAL;
     }
 
-    // If allocated, return the allocation rank
-    if (page_rank[page_idx] > 0) {
-        return page_rank[page_idx];
-    }
-
-    // If free, find the maximum rank of free block containing this page
-    for (int r = MAXRANK; r >= 1; r--) {
-        free_block_t *current = free_lists[r];
-        while (current != NULL) {
-            int block_page_idx = ((char *)current - (char *)memory_start) / PAGE_SIZE;
-            int pages_in_block = 1 << (r - 1);
-            if (page_idx >= block_page_idx && page_idx < block_page_idx + pages_in_block) {
-                return r;
-            }
-            current = current->next;
-        }
+    // Return the stored rank (mask out the allocated bit)
+    int rank_byte = page_rank[page_idx];
+    int rank = rank_byte & 0x7F;
+    if (rank > 0 && rank <= MAXRANK) {
+        return rank;
     }
 
     return -EINVAL;
