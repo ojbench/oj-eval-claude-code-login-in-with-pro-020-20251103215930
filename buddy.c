@@ -5,9 +5,10 @@
 #define PAGE_SIZE 4096
 #define ALLOCATED_BIT 0x80  // High bit indicates allocated
 
-// Free list for each rank
+// Free list for each rank - doubly linked for O(1) removal
 typedef struct free_block {
     struct free_block *next;
+    struct free_block *prev;
 } free_block_t;
 
 static free_block_t *free_lists[MAXRANK + 1];
@@ -51,14 +52,18 @@ static int is_block_in_free_list(int page_idx, int rank) {
 // Helper function to remove a block from free list
 static void remove_from_free_list(int page_idx, int rank) {
     void *block_addr = memory_start + page_idx * PAGE_SIZE;
-    free_block_t **current = &free_lists[rank];
+    free_block_t *block = (free_block_t *)block_addr;
 
-    while (*current != NULL) {
-        if ((void *)(*current) == block_addr) {
-            *current = (*current)->next;
-            return;
-        }
-        current = &((*current)->next);
+    // Remove from doubly-linked list
+    if (block->prev != NULL) {
+        block->prev->next = block->next;
+    } else {
+        // This is the head of the list
+        free_lists[rank] = block->next;
+    }
+
+    if (block->next != NULL) {
+        block->next->prev = block->prev;
     }
 }
 
@@ -66,7 +71,14 @@ static void remove_from_free_list(int page_idx, int rank) {
 static void add_to_free_list(int page_idx, int rank) {
     void *block_addr = memory_start + page_idx * PAGE_SIZE;
     free_block_t *block = (free_block_t *)block_addr;
+
+    // Add to head of doubly-linked list
     block->next = free_lists[rank];
+    block->prev = NULL;
+
+    if (free_lists[rank] != NULL) {
+        free_lists[rank]->prev = block;
+    }
     free_lists[rank] = block;
 
     // Mark all pages in this free block with the rank (without ALLOCATED_BIT)
